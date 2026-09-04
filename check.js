@@ -5,6 +5,7 @@ const URL = 'https://agendamiento.dian.gov.co/';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
          + '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 const CARGANDO = '#mpcWPdivCargando';
+const T = 180000;   // timeout generoso: el backend de la DIAN es muy lento
 
 const PASOS = [
   { tipo: 'control', nombre: 'btnSolicitarCita', espera: 'TipoPersona' },
@@ -33,7 +34,7 @@ const controles = page => page.evaluate(ign =>
     t: (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 80),
   })), IGNORAR);
 
-async function esperarOverlay(page, ms = 120000) {
+async function esperarOverlay(page, ms = T) {
   await page.waitForTimeout(800);
   try {
     await page.locator(CARGANDO).waitFor({ state: 'hidden', timeout: ms });
@@ -47,6 +48,7 @@ async function esperarOverlay(page, ms = 120000) {
 async function ejecutar(page, paso) {
   const t0 = Date.now();
   let loc;
+
   if (paso.tipo === 'opcion') {
     loc = page.locator(`[nombre="${paso.nombre}"] .boton`)
               .filter({ hasText: new RegExp(`^\\s*${esc(paso.opcion)}\\s*$`) }).first();
@@ -58,18 +60,19 @@ async function ejecutar(page, paso) {
     loc = page.locator(`[nombre="${paso.nombre}"]`).filter({ visible: true }).first();
   }
 
-  await loc.waitFor({ state: 'visible', timeout: 90000 });
+  await loc.waitFor({ state: 'visible', timeout: T });
   await loc.scrollIntoViewIfNeeded().catch(() => {});
-  await loc.click({ timeout: 90000 });
+  await loc.click({ timeout: 120000 });
 
-  await esperarOverlay(page);
+  await esperarOverlay(page, T);
   if (paso.espera) {
     await page.locator(`[nombre="${paso.espera}"]`).filter({ visible: true }).first()
-              .waitFor({ state: 'visible', timeout: 60000 });
+              .waitFor({ state: 'visible', timeout: T });
   }
-  await page.waitForTimeout(1200);
+  await page.waitForTimeout(1500);
 
-  return `${paso.opcion ? `${paso.nombre}>"${paso.opcion}"` : paso.nombre} [${((Date.now()-t0)/1000).toFixed(0)}s]`;
+  const etiqueta = paso.opcion ? `${paso.nombre}>"${paso.opcion}"` : paso.nombre;
+  return `${etiqueta} [${((Date.now() - t0) / 1000).toFixed(0)}s]`;
 }
 
 (async () => {
@@ -85,12 +88,14 @@ async function ejecutar(page, paso) {
   const page = await ctx.newPage();
 
   let estado = 'roto', detalle = '';
+  const inicio = Date.now();
 
   try {
-    const resp = await page.goto(URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    const resp = await page.goto(URL, { waitUntil: 'domcontentloaded', timeout: 90000 });
     if (!resp || resp.status() >= 400) throw new Error(`HTTP ${resp?.status()}`);
-    await page.locator('[nombre]').first().waitFor({ state: 'attached', timeout: 90000 });
-    await esperarOverlay(page).catch(() => {});
+
+    await page.locator('[nombre]').first().waitFor({ state: 'attached', timeout: T });
+    await esperarOverlay(page, T).catch(() => {});
     await page.waitForTimeout(2000);
 
     for (const [i, paso] of PASOS.entries()) {
@@ -99,7 +104,7 @@ async function ejecutar(page, paso) {
 
     const salioModal = await page.locator('[nombre="ModalError"]')
       .filter({ visible: true }).first()
-      .waitFor({ state: 'visible', timeout: 45000 }).then(() => true).catch(() => false);
+      .waitFor({ state: 'visible', timeout: 90000 }).then(() => true).catch(() => false);
 
     const finales = await controles(page);
 
@@ -121,11 +126,13 @@ async function ejecutar(page, paso) {
     finales.forEach(x => console.log(`   ${x.n} (${x.p}) :: ${x.t}`));
 
   } catch (e) {
-    estado = e.lento ? 'lento' : 'roto';
-    detalle = e.message.split('\n')[0].slice(0, 150);
+    const msg = e.message.split('\n')[0];
+    // un timeout no es que el flujo cambió: es que el sitio no respondió a tiempo
+    estado = (e.lento || /Timeout/i.test(msg)) ? 'lento' : 'roto';
+    detalle = msg.slice(0, 150);
   }
 
-  console.log('\nESTADO:', estado, '|', detalle);
+  console.log(`\nESTADO: ${estado} | ${detalle} | total ${((Date.now() - inicio) / 1000).toFixed(0)}s`);
   await page.screenshot({ path: 'estado.png', fullPage: true }).catch(() => {});
   salida('estado', estado);
   salida('detalle', detalle);
