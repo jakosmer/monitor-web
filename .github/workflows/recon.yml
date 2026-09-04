@@ -1,0 +1,32 @@
+name: Reconocimiento
+
+on:
+  workflow_dispatch:
+    inputs:
+      pasos:
+        description: 'Textos a clickear, separados por coma'
+        required: false
+        default: ''
+
+jobs:
+  recon:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}
+      - run: npm install playwright
+      - run: npx playwright install --with-deps chromium
+      - run: node recon.js
+        env:
+          PASOS: ${{ inputs.pasos }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: capturas
+          path: '*.png'
