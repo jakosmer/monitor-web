@@ -1,41 +1,108 @@
-name: Reconocimiento
+name: Monitor citas
 
 on:
+  schedule:
+    - cron: '*/15 * * * *'
   workflow_dispatch:
-    inputs:
-      pasos:
-        description: 'Nombres de control, separados por coma'
-        required: false
-        default: ''
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: monitor-dian
+  cancel-in-progress: false
 
 jobs:
-  recon:
+  check:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+
       - uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}
+
       - run: npm install playwright
       - run: npx playwright install --with-deps chromium
-      - run: sudo apt-get install -y xvfb
-      
-      - name: Diagnóstico de red
-        run: node diagnostico.js
-        continue-on-error: true
 
-      - name: Reconocer
-        run: xvfb-run -a --server-args="-screen 0 1366x900x24" node recon.js
-        env:
-          PASOS: ${{ inputs.pasos }}
-        continue-on-error: true
-        
-      - uses: actions/upload-artifact@v4
+      - name: Revisar disponibilidad
+        id: check
+        run: node check.js
+
+      - name: Guardar captura
         if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: capturas
-          path: '*.png'
+          name: estado-${{ github.run_number }}
+          path: estado.png
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: HAY CITAS
+        if: steps.check.outputs.estado == 'con_citas'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          YO: ${{ github.repository_owner }}
+          D: ${{ steps.check.outputs.detalle }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          HORA=$(TZ=America/Bogota date '+%d/%m %H:%M')
+          NUM=$(gh issue list --state open --search "HAY CITAS in:title" \
+                --json number --jq '.[0].number // empty')
+          CUERPO="Detectado: $HORA (Bogota)
+
+          Persona Natural / Videoatencion / Devoluciones
+
+          Deteccion: $D
+
+          Agendar: https://agendamiento.dian.gov.co/
+          Captura: $RUN_URL"
+          if [ -z "$NUM" ]; then
+            gh issue create --title "🚨 HAY CITAS DIAN - Devoluciones" \
+              --body "$CUERPO" --assignee "$YO"
+          else
+            gh issue comment "$NUM" --body "Sigue disponible ($HORA)"
+          fi
+
+      - name: Se restablecio
+        if: steps.check.outputs.estado == 'sin_citas'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NUM=$(gh issue list --state open --search "monitor se rompio in:title" \
+                --json number --jq '.[0].number // empty')
+          if [ -n "$NUM" ]; then
+            gh issue close "$NUM" --comment "El flujo volvio a funcionar, cerrando."
+          fi
+
+      - name: Monitor roto
+        if: steps.check.outputs.estado == 'roto'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          YO: ${{ github.repository_owner }}
+          D: ${{ steps.check.outputs.detalle }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          NUM=$(gh issue list --state open --search "monitor se rompio in:title" \
+                --json number --jq '.[0].number // empty')
+          if [ -z "$NUM" ]; then
+            gh issue create --title "⚠️ El monitor se rompio" \
+              --body "Motivo: $D
+
+          Revisa la captura en $RUN_URL
+
+          Probablemente la DIAN cambio nombres de control o textos de opciones." \
+              --assignee "$YO"
+          fi
+
+      - name: Backend lento (sin alerta)
+        if: steps.check.outputs.estado == 'lento'
+        run: echo "Overlay de carga no desaparecio. Se reintenta en la proxima corrida."
