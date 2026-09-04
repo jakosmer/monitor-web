@@ -5,7 +5,7 @@ const URL = 'https://agendamiento.dian.gov.co/';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
          + '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 const CARGANDO = '#mpcWPdivCargando';
-const T = 180000;   // timeout generoso: el backend de la DIAN es muy lento
+const T = 120000;
 
 const PASOS = [
   { tipo: 'control', nombre: 'btnSolicitarCita', espera: 'TipoPersona' },
@@ -31,18 +31,22 @@ const controles = page => page.evaluate(ign =>
   }).map(el => ({
     n: el.getAttribute('nombre'),
     p: el.getAttribute('pantalla'),
-    t: (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 80),
+    t: (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 60),
   })), IGNORAR);
 
+async function diagnostico(page, etiqueta) {
+  console.log(`\n### DIAGNOSTICO: ${etiqueta} ###`);
+  const overlay = await page.locator(CARGANDO).isVisible().catch(() => 'error');
+  console.log('overlay visible:', overlay);
+  const c = await controles(page).catch(() => []);
+  console.log(`controles visibles (${c.length}):`);
+  c.forEach(x => console.log(`   ${x.n} (${x.p}) :: ${x.t}`));
+  await page.screenshot({ path: 'estado.png', fullPage: true }).catch(() => {});
+}
+
 async function esperarOverlay(page, ms = T) {
-  await page.waitForTimeout(800);
-  try {
-    await page.locator(CARGANDO).waitFor({ state: 'hidden', timeout: ms });
-  } catch {
-    const e = new Error('overlay de carga no desaparece (backend lento)');
-    e.lento = true;
-    throw e;
-  }
+  await page.waitForTimeout(1000);
+  await page.locator(CARGANDO).waitFor({ state: 'hidden', timeout: ms }).catch(() => {});
 }
 
 async function ejecutar(page, paso) {
@@ -62,15 +66,25 @@ async function ejecutar(page, paso) {
 
   await loc.waitFor({ state: 'visible', timeout: T });
   await loc.scrollIntoViewIfNeeded().catch(() => {});
-  await loc.click({ timeout: 120000 });
 
-  await esperarOverlay(page, T);
-  if (paso.espera) {
-    await page.locator(`[nombre="${paso.espera}"]`).filter({ visible: true }).first()
-              .waitFor({ state: 'visible', timeout: T });
+  // reintenta el click: el player puede no haber enganchado el evento todavia
+  let ok = false;
+  for (let intento = 1; intento <= 3 && !ok; intento++) {
+    await loc.click({ timeout: 60000 });
+    await esperarOverlay(page, T);
+    if (!paso.espera) { ok = true; break; }
+    ok = await page.locator(`[nombre="${paso.espera}"]`).filter({ visible: true }).first()
+                   .waitFor({ state: 'visible', timeout: intento === 3 ? T : 45000 })
+                   .then(() => true).catch(() => false);
+    if (!ok) console.log(`   (intento ${intento}: no aparecio ${paso.espera}, reintentando)`);
   }
-  await page.waitForTimeout(1500);
 
+  if (!ok) {
+    await diagnostico(page, `fallo esperando ${paso.espera}`);
+    throw new Error(`no aparecio ${paso.espera} tras 3 intentos`);
+  }
+
+  await page.waitForTimeout(1500);
   const etiqueta = paso.opcion ? `${paso.nombre}>"${paso.opcion}"` : paso.nombre;
   return `${etiqueta} [${((Date.now() - t0) / 1000).toFixed(0)}s]`;
 }
@@ -87,6 +101,8 @@ async function ejecutar(page, paso) {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined }));
   const page = await ctx.newPage();
 
+  page.on('pageerror', e => console.log('  [JS ERROR]', String(e).slice(0, 150)));
+
   let estado = 'roto', detalle = '';
   const inicio = Date.now();
 
@@ -94,9 +110,10 @@ async function ejecutar(page, paso) {
     const resp = await page.goto(URL, { waitUntil: 'domcontentloaded', timeout: 90000 });
     if (!resp || resp.status() >= 400) throw new Error(`HTTP ${resp?.status()}`);
 
-    await page.locator('[nombre]').first().waitFor({ state: 'attached', timeout: T });
-    await esperarOverlay(page, T).catch(() => {});
-    await page.waitForTimeout(2000);
+    await page.locator('[nombre="btnSolicitarCita"]').waitFor({ state: 'visible', timeout: T });
+    await esperarOverlay(page, T);
+    await page.waitForTimeout(5000);   // margen para que el player enganche eventos
+    console.log('pantalla inicial lista');
 
     for (const [i, paso] of PASOS.entries()) {
       console.log(`paso ${i + 1} ok: ${await ejecutar(page, paso)}`);
@@ -127,9 +144,9 @@ async function ejecutar(page, paso) {
 
   } catch (e) {
     const msg = e.message.split('\n')[0];
-    // un timeout no es que el flujo cambió: es que el sitio no respondió a tiempo
-    estado = (e.lento || /Timeout/i.test(msg)) ? 'lento' : 'roto';
+    estado = /Timeout|no aparecio/i.test(msg) ? 'lento' : 'roto';
     detalle = msg.slice(0, 150);
+    await diagnostico(page, 'excepcion').catch(() => {});
   }
 
   console.log(`\nESTADO: ${estado} | ${detalle} | total ${((Date.now() - inicio) / 1000).toFixed(0)}s`);
