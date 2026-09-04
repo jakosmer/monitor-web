@@ -1,4 +1,4 @@
-name: Monitor citas DIAN
+name: Monitor citas
 
 on:
   schedule:
