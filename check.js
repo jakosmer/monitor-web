@@ -18,7 +18,6 @@ const BASE = ['PasoUno','txtTitulo','txtPasoUno','txtTipoPersona','TipoPersona',
               'txtTipoAtencion','TipoAtencion','txtCategoria','Categorias',
               'btnAnterior','btnSiguienteBlock','btnSiguiente'];
 const IGNORAR = ['_Header', '_Footer', '_NavPaginaDIAN'];
-const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const salida = (k, v) => process.env.GITHUB_OUTPUT
   && fs.appendFileSync(process.env.GITHUB_OUTPUT, `${k}=${v}\n`);
@@ -36,8 +35,7 @@ const controles = page => page.evaluate(ign =>
 
 async function diagnostico(page, etiqueta) {
   console.log(`\n### DIAGNOSTICO: ${etiqueta} ###`);
-  const overlay = await page.locator(CARGANDO).isVisible().catch(() => 'error');
-  console.log('overlay visible:', overlay);
+  console.log('overlay visible:', await page.locator(CARGANDO).isVisible().catch(() => '?'));
   const c = await controles(page).catch(() => []);
   console.log(`controles visibles (${c.length}):`);
   c.forEach(x => console.log(`   ${x.n} (${x.p}) :: ${x.t}`));
@@ -49,39 +47,72 @@ async function esperarOverlay(page, ms = T) {
   await page.locator(CARGANDO).waitFor({ state: 'hidden', timeout: ms }).catch(() => {});
 }
 
+// clickea una opcion dentro de un control, en el propio DOM (evita rarezas de locators)
+async function clickOpcion(page, control, opcion) {
+  const hijos = await page.evaluate(({ control, opcion }) => {
+    const cont = document.querySelector(`[nombre="${control}"]`);
+    if (!cont) return { error: 'contenedor no existe' };
+    const cands = [...cont.querySelectorAll('div, span, li, button')]
+      .filter(el => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      })
+      .map(el => ({
+        clase: el.className.toString(),
+        texto: (el.innerText || '').replace(/\s+/g, ' ').trim(),
+      }));
+    return { cands };
+  }, { control, opcion });
+
+  if (hijos.error) throw new Error(`${control}: ${hijos.error}`);
+
+  // estrategias en orden de preferencia
+  const objetivo = opcion.trim();
+  const intentos = [
+    page.locator(`[nombre="${control}"] .boton`).filter({ hasText: objetivo }),
+    page.locator(`[nombre="${control}"] [class*="btn"]`).filter({ hasText: objetivo }),
+    page.locator(`[nombre="${control}"] div`).filter({ hasText: objetivo }),
+  ];
+
+  for (const loc of intentos) {
+    const n = await loc.count().catch(() => 0);
+    if (n === 0) continue;
+    const el = loc.last();          // el mas interno que coincide
+    await el.scrollIntoViewIfNeeded().catch(() => {});
+    await el.click({ timeout: 60000 });
+    return;
+  }
+
+  console.log(`   candidatos en ${control}:`);
+  hijos.cands.slice(0, 20).forEach(c =>
+    console.log(`     [${c.clase.slice(0, 40)}] ${c.texto.slice(0, 40)}`));
+  throw new Error(`no encontre la opcion "${opcion}" en ${control}`);
+}
+
 async function ejecutar(page, paso) {
   const t0 = Date.now();
-  let loc;
 
   if (paso.tipo === 'opcion') {
-    loc = page.locator(`[nombre="${paso.nombre}"] .boton`)
-              .filter({ hasText: new RegExp(`^\\s*${esc(paso.opcion)}\\s*$`) }).first();
-    if (!(await loc.count())) {
-      loc = page.locator(`[nombre="${paso.nombre}"] .boton`)
-                .filter({ hasText: paso.opcion }).first();
-    }
+    await page.locator(`[nombre="${paso.nombre}"]`).first()
+              .waitFor({ state: 'visible', timeout: T });
+    await page.waitForTimeout(2000);
+    await clickOpcion(page, paso.nombre, paso.opcion);
   } else {
-    loc = page.locator(`[nombre="${paso.nombre}"]`).filter({ visible: true }).first();
+    const l = page.locator(`[nombre="${paso.nombre}"]`).filter({ visible: true }).first();
+    await l.waitFor({ state: 'visible', timeout: T });
+    await l.click({ timeout: 60000 });
   }
 
-  await loc.waitFor({ state: 'visible', timeout: T });
-  await loc.scrollIntoViewIfNeeded().catch(() => {});
+  await esperarOverlay(page, T);
 
-  // reintenta el click: el player puede no haber enganchado el evento todavia
-  let ok = false;
-  for (let intento = 1; intento <= 3 && !ok; intento++) {
-    await loc.click({ timeout: 60000 });
-    await esperarOverlay(page, T);
-    if (!paso.espera) { ok = true; break; }
-    ok = await page.locator(`[nombre="${paso.espera}"]`).filter({ visible: true }).first()
-                   .waitFor({ state: 'visible', timeout: intento === 3 ? T : 45000 })
-                   .then(() => true).catch(() => false);
-    if (!ok) console.log(`   (intento ${intento}: no aparecio ${paso.espera}, reintentando)`);
-  }
-
-  if (!ok) {
-    await diagnostico(page, `fallo esperando ${paso.espera}`);
-    throw new Error(`no aparecio ${paso.espera} tras 3 intentos`);
+  if (paso.espera) {
+    const ok = await page.locator(`[nombre="${paso.espera}"]`).filter({ visible: true }).first()
+                         .waitFor({ state: 'visible', timeout: T })
+                         .then(() => true).catch(() => false);
+    if (!ok) {
+      await diagnostico(page, `no aparecio ${paso.espera}`);
+      throw new Error(`no aparecio ${paso.espera}`);
+    }
   }
 
   await page.waitForTimeout(1500);
@@ -112,7 +143,7 @@ async function ejecutar(page, paso) {
 
     await page.locator('[nombre="btnSolicitarCita"]').waitFor({ state: 'visible', timeout: T });
     await esperarOverlay(page, T);
-    await page.waitForTimeout(5000);   // margen para que el player enganche eventos
+    await page.waitForTimeout(5000);
     console.log('pantalla inicial lista');
 
     for (const [i, paso] of PASOS.entries()) {
@@ -144,7 +175,8 @@ async function ejecutar(page, paso) {
 
   } catch (e) {
     const msg = e.message.split('\n')[0];
-    estado = /Timeout|no aparecio/i.test(msg) ? 'lento' : 'roto';
+    estado = /no encontre la opcion/i.test(msg) ? 'roto'
+           : /Timeout|no aparecio/i.test(msg) ? 'lento' : 'roto';
     detalle = msg.slice(0, 150);
     await diagnostico(page, 'excepcion').catch(() => {});
   }
