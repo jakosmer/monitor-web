@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       pasos:
-        description: 'Textos a clickear, separados por coma'
+        description: 'Nombres de control, separados por coma'
         required: false
         default: ''
 
@@ -22,7 +22,9 @@ jobs:
           key: playwright-${{ runner.os }}
       - run: npm install playwright
       - run: npx playwright install --with-deps chromium
-      - run: node recon.js
+      - run: sudo apt-get install -y xvfb
+      - name: Reconocer
+        run: xvfb-run -a --server-args="-screen 0 1366x900x24" node recon.js
         env:
           PASOS: ${{ inputs.pasos }}
       - uses: actions/upload-artifact@v4
