@@ -1,8 +1,8 @@
-name: Monitor citas
+name: Monitor citas DIAN
 
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '*/30 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -16,7 +16,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
 
     steps:
       - uses: actions/checkout@v4
@@ -97,12 +97,12 @@ jobs:
             gh issue create --title "⚠️ El monitor se rompio" \
               --body "Motivo: $D
 
-          Revisa la captura en $RUN_URL
+          Captura en $RUN_URL
 
-          Probablemente la DIAN cambio nombres de control o textos de opciones." \
+          Probablemente cambiaron nombres de control o textos de opciones." \
               --assignee "$YO"
           fi
 
-      - name: Backend lento (sin alerta)
+      - name: Backend lento
         if: steps.check.outputs.estado == 'lento'
-        run: echo "Overlay de carga no desaparecio. Se reintenta en la proxima corrida."
+        run: echo "El sitio no respondio a tiempo. Se reintenta en la proxima corrida."
