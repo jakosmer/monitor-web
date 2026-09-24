@@ -1,8 +1,8 @@
 name: Monitor citas
 
 on:
-  schedule:
-    - cron: '*/15 12-23 * * *'     # 19:00–20:59 Bogota
+  #schedule:
+  #  - cron: '*/15 12-23 * * *'     # 19:00–20:59 Bogota
   workflow_dispatch:
 
 permissions:
